@@ -17,3 +17,4 @@ Features:
 An Audius API key is optional and can be supplied through the Synthetiq configuration field `audiusApiKey`.
 
 This package is prepared for upload to a GitHub repository. Whether Synthetiq Music accepts a GitHub repository URL directly depends on the module-import feature supported by the installed Synthetiq Music build.
+modules-v1.json
