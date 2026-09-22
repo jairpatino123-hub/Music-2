@@ -1,76 +1,138 @@
 (() => {
   'use strict';
 
-  const MODULE_NAME = 'SynthetiqYouTubeMusicV120';
-  const YOUTUBE_API = 'https://www.googleapis.com/youtube/v3';
-  const YOUTUBE_WATCH = 'https://www.youtube.com/watch?v=';
-  const YOUTUBE_EMBED = 'https://www.youtube.com/embed/';
-  const YOUTUBE_THUMB = 'https://i.ytimg.com/vi/';
-  const DEFAULT_REGION = 'US';
-  const DEFAULT_LANGUAGE = 'en';
-
-  /*
-   * API key is intentionally NOT embedded in this package.
-   * The runtime expects Synthetiq Music to inject:
-   *   globalThis.SYNTHETIQ_CONFIG.youtubeApiKey
-   * The module also accepts SYNTHETIQ_CONFIG.YOUTUBE_API_KEY for compatibility.
-   */
+  const MODULE_NAME = 'SynthetiqAudiusMusicV130';
+  const API = 'https://api.audius.co/v1';
+  const APP_NAME = 'SynthetiqMusic';
 
   function log(message) {
     try { console.log('[' + MODULE_NAME + '] ' + String(message || '')); } catch (_) {}
-  }
-
-  function fail(message) {
-    return { ok: false, error: { message: String(message || 'YouTube Music module error') } };
   }
 
   function ok(data) {
     return { ok: true, data: JSON.stringify(data) };
   }
 
+  function fail(message) {
+    return {
+      ok: false,
+      error: { message: String(message || 'Audius Music module error') }
+    };
+  }
+
+  function getConfig() {
+    try {
+      return globalThis.SYNTHETIQ_CONFIG || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
   function getApiKey() {
-    try {
-      const k = globalThis.SYNTHETIQ_CONFIG &&
-        (globalThis.SYNTHETIQ_CONFIG.youtubeApiKey || globalThis.SYNTHETIQ_CONFIG.YOUTUBE_API_KEY);
-      if (k && String(k).trim()) return String(k).trim();
-    } catch (_) {}
+    const cfg = getConfig();
+    const value = cfg.audiusApiKey || cfg.AUDIUS_API_KEY || '';
+    return String(value || '').trim();
+  }
 
+  function text(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  }
+
+  function artwork(track) {
+    const a = track && track.artwork;
+    if (!a) return '';
+    return text(
+      a._1000x1000 ||
+      a._480x480 ||
+      a._150x150 ||
+      (typeof a === 'string' ? a : '')
+    );
+  }
+
+  function artistName(track) {
+    const user = track && track.user;
+    if (!user) return '';
+    return text(user.name || user.handle || '');
+  }
+
+  function streamable(track) {
+    return track && (
+      track.isStreamable === true ||
+      track.isStreamable === 'true' ||
+      track.is_streamable === true ||
+      track.is_streamable === 'true'
+    );
+  }
+
+  function mapTrack(track) {
+    if (!track || !track.id) return null;
+
+    const id = String(track.id);
+    const title = text(track.title);
+    const artist = artistName(track);
+    const duration = Number(track.duration || 0);
+
+    return {
+      id: 'audius:' + id,
+      title,
+      artist,
+      album: '',
+      artwork: artwork(track),
+      durationSeconds: Number.isFinite(duration) ? duration : 0,
+      description: text(track.description),
+      genre: text(track.genre),
+      source: 'audius',
+      sourceId: id,
+      permalink: text(track.permalink),
+      isStreamable: !!streamable(track),
+      downloadable: !!track.downloadable,
+      playCount: Number(track.playCount || track.play_count || 0)
+    };
+  }
+
+  async function readJson(response) {
+    if (!response) throw new Error('Audius API returned no response');
+
+    let data;
     try {
-      if (typeof process !== 'undefined' && process.env && process.env.YOUTUBE_API_KEY) {
-        return String(process.env.YOUTUBE_API_KEY).trim();
+      if (typeof response.json === 'function') {
+        data = await response.json();
+      } else if (typeof response.text === 'function') {
+        data = JSON.parse(await response.text());
+      } else {
+        data = JSON.parse(String(response.body || ''));
       }
-    } catch (_) {}
-
-    return '';
-  }
-
-  function text(v) {
-    return String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
-  }
-
-  function pickThumb(snippet) {
-    const t = snippet && snippet.thumbnails;
-    return text((t && ((t.maxres && t.maxres.url) || (t.high && t.high.url) ||
-      (t.medium && t.medium.url) || (t.default && t.default.url))) || '');
-  }
-
-  function parseDuration(iso) {
-    const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(String(iso || ''));
-    if (!m) return 0;
-    return (Number(m[1] || 0) * 3600) + (Number(m[2] || 0) * 60) + Number(m[3] || 0);
-  }
-
-  async function getJson(endpoint, params) {
-    const key = getApiKey();
-    if (!key) {
-      throw new Error('YouTube Data API key is not configured. Enter it in the Synthetiq Music module configuration as youtubeApiKey.');
+    } catch (_) {
+      throw new Error('Audius API returned invalid JSON');
     }
 
-    const q = Object.assign({}, params || {}, { key });
-    const url = YOUTUBE_API + endpoint + '?' + Object.keys(q)
+    if (!data) throw new Error('Audius API returned an empty response');
+
+    if (data.error) {
+      const message =
+        typeof data.error === 'string'
+          ? data.error
+          : (data.error.message || 'Audius API request failed');
+      throw new Error(message);
+    }
+
+    return data;
+  }
+
+  async function apiGet(endpoint, params) {
+    const q = Object.assign({}, params || {}, { app_name: APP_NAME });
+
+    // Audius supports public read-only API access. An API key is optional
+    // and can be supplied through Synthetiq Music configuration for higher limits.
+    const apiKey = getApiKey();
+    if (apiKey) q.api_key = apiKey;
+
+    const query = Object.keys(q)
       .filter(k => q[k] !== undefined && q[k] !== null && q[k] !== '')
       .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(String(q[k])))
       .join('&');
+
+    const url = API + endpoint + (query ? '?' + query : '');
 
     let response;
     if (typeof fetchv2 === 'function') {
@@ -78,112 +140,80 @@
         method: 'GET',
         headers: { Accept: 'application/json' }
       });
+    } else if (typeof fetch === 'function') {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' }
+      });
     } else {
-      response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+      throw new Error('No HTTP fetch function is available');
     }
 
-    let data;
-    try {
-      if (response && typeof response.json === 'function') data = await response.json();
-      else if (response && typeof response.text === 'function') data = JSON.parse(await response.text());
-      else data = JSON.parse(String(response && response.body || ''));
-    } catch (_) {
-      throw new Error('YouTube API returned invalid JSON');
-    }
-
-    if (!data || data.error) {
-      const msg = data && data.error && data.error.message ? data.error.message : 'YouTube API request failed';
-      throw new Error(msg);
-    }
-    return data;
+    return readJson(response);
   }
 
-  function mapSearchVideo(item) {
-    const id = item && item.id && item.id.videoId;
-    const s = item && item.snippet;
-    if (!id || !s) return null;
-    return {
-      id: 'yt:' + id,
-      title: text(s.title),
-      artist: text(s.channelTitle),
-      album: '',
-      artwork: pickThumb(s) || (YOUTUBE_THUMB + id + '/hqdefault.jpg'),
-      durationSeconds: 0,
-      description: text(s.description),
-      source: 'youtube',
-      videoId: id,
-      videoUrl: YOUTUBE_WATCH + encodeURIComponent(id),
-      embedUrl: YOUTUBE_EMBED + encodeURIComponent(id)
-    };
-  }
+  async function searchTracks(query, page) {
+    const q = text(query);
+    if (!q) return [];
 
-  function mapVideo(item) {
-    const id = item && item.id;
-    const s = item && item.snippet;
-    const c = item && item.contentDetails;
-    if (!id || !s) return null;
-    return {
-      id: 'yt:' + id,
-      title: text(s.title),
-      artist: text(s.channelTitle),
-      album: '',
-      artwork: pickThumb(s) || (YOUTUBE_THUMB + id + '/hqdefault.jpg'),
-      durationSeconds: parseDuration(c && c.duration),
-      description: text(s.description),
-      source: 'youtube',
-      videoId: id,
-      videoUrl: YOUTUBE_WATCH + encodeURIComponent(id),
-      embedUrl: YOUTUBE_EMBED + encodeURIComponent(id)
-    };
-  }
+    const pageNumber = Math.max(0, Number(page || 0));
+    const limit = 25;
+    const offset = pageNumber * limit;
 
-  async function searchYouTube(query, pageToken) {
-    const data = await getJson('/search', {
-      part: 'snippet',
-      q: text(query),
-      type: 'video',
-      maxResults: 25,
-      pageToken: pageToken || undefined,
-      regionCode: DEFAULT_REGION,
-      relevanceLanguage: DEFAULT_LANGUAGE,
-      videoEmbeddable: 'true',
-      videoSyndicated: 'true',
-      order: 'relevance'
+    const data = await apiGet('/tracks/search', {
+      query: q,
+      limit,
+      offset
     });
 
-    const rows = (data.items || []).map(mapSearchVideo).filter(Boolean);
-    return { rows, nextPageToken: data.nextPageToken || '' };
+    const rows = Array.isArray(data.data) ? data.data : [];
+    return rows.map(mapTrack).filter(Boolean);
   }
 
-  async function getVideos(ids) {
-    const list = Array.isArray(ids) ? ids.filter(Boolean) : [ids].filter(Boolean);
-    if (!list.length) return [];
-    const data = await getJson('/videos', {
-      part: 'snippet,contentDetails',
-      id: list.slice(0, 50).join(',')
-    });
-    return (data.items || []).map(mapVideo).filter(Boolean);
+  async function getTrack(trackId) {
+    const id = text(trackId).replace(/^audius:/i, '');
+    if (!id) throw new Error('Invalid Audius track ID');
+
+    const data = await apiGet('/tracks/' + encodeURIComponent(id));
+    const track = data && data.data;
+    const mapped = mapTrack(track);
+
+    if (!mapped) throw new Error('Audius track not found');
+    return mapped;
   }
 
-  function normalizeId(id) {
-    const s = text(id).replace(/^yt:/i, '');
-    if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+  function normalizeId(value) {
+    if (value && typeof value === 'object') {
+      value = value.id || value.sourceId || value.trackId || '';
+    }
 
+    const id = text(value).replace(/^audius:/i, '');
+    if (!id) return '';
+
+    // Accept an Audius canonical URL.
     try {
-      const u = new URL(s);
-      if (u.hostname === 'youtu.be') return u.pathname.replace(/^\/+/, '').slice(0, 11);
-      if (u.hostname.includes('youtube.com')) return u.searchParams.get('v') || '';
-      if (u.pathname.startsWith('/embed/')) return u.pathname.split('/')[2] || '';
+      if (/^https?:\/\//i.test(id)) {
+        const u = new URL(id);
+        const match = u.pathname.match(/\/tracks\/([^/?#]+)/i);
+        if (match) return match[1];
+      }
     } catch (_) {}
-    return '';
+
+    return id;
   }
 
   async function searchResults(query, page) {
     try {
-      const q = typeof query === 'object' ? (query.query || query.q || '') : query;
-      const p = Number(page || 0);
-      const result = await searchYouTube(q, p > 0 && typeof query === 'object' ? query.pageToken : undefined);
-      return ok(result.rows);
+      const q = typeof query === 'object'
+        ? (query.query || query.q || '')
+        : query;
+
+      const p = typeof query === 'object'
+        ? (query.page || page || 0)
+        : (page || 0);
+
+      const rows = await searchTracks(q, p);
+      return ok(rows);
     } catch (e) {
       log('search failed: ' + (e && e.message ? e.message : e));
       return fail(e && e.message ? e.message : e);
@@ -193,23 +223,31 @@
   async function homeSections(page) {
     try {
       if (Number(page || 0) > 0) return ok([]);
-      const queries = [
-        ['Music Videos', 'official music video'],
-        ['New Music', 'new music official'],
-        ['Popular Songs', 'popular songs official music video']
-      ];
+
       const sections = [];
 
-      for (const row of queries) {
+      const sources = [
+        ['Trending', '/tracks/trending'],
+        ['New Music', '/tracks/latest']
+      ];
+
+      for (const [title, endpoint] of sources) {
         try {
-          const r = await searchYouTube(row[1]);
-          if (r.rows.length) sections.push({
-            title: row[0],
-            type: 'track',
-            items: r.rows.slice(0, 12)
-          });
+          const data = await apiGet(endpoint, { limit: 12 });
+          const rows = Array.isArray(data.data)
+            ? data.data.map(mapTrack).filter(Boolean)
+            : [];
+
+          if (rows.length) {
+            sections.push({
+              title,
+              type: 'track',
+              items: rows
+            });
+          }
         } catch (e) {
-          log('home section failed: ' + row[0] + ': ' + (e && e.message ? e.message : e));
+          log('home section failed: ' + title + ': ' +
+            (e && e.message ? e.message : e));
         }
       }
 
@@ -221,11 +259,10 @@
 
   async function extractDetails(id) {
     try {
-      const videoId = normalizeId(typeof id === 'object' ? (id.id || id.videoId || '') : id);
-      if (!videoId) throw new Error('Invalid YouTube video ID');
-      const rows = await getVideos([videoId]);
-      if (!rows.length) throw new Error('YouTube video not found');
-      return ok(rows[0]);
+      const trackId = normalizeId(id);
+      if (!trackId) throw new Error('Invalid Audius track ID');
+
+      return ok(await getTrack(trackId));
     } catch (e) {
       return fail(e && e.message ? e.message : e);
     }
@@ -235,8 +272,8 @@
     try {
       const detail = await extractDetails(id);
       if (!detail.ok) return detail;
-      const item = JSON.parse(detail.data);
-      return ok([item]);
+
+      return ok([JSON.parse(detail.data)]);
     } catch (e) {
       return fail(e && e.message ? e.message : e);
     }
@@ -244,28 +281,37 @@
 
   async function extractAudioUrl(id) {
     try {
-      const videoId = normalizeId(typeof id === 'object' ? (id.id || id.videoId || '') : id);
-      if (!videoId) throw new Error('Invalid YouTube video ID');
+      const trackId = normalizeId(id);
+      if (!trackId) throw new Error('Invalid Audius track ID');
 
-      const rows = await getVideos([videoId]);
-      const item = rows[0];
-      if (!item) throw new Error('YouTube video not found');
+      const track = await getTrack(trackId);
 
-      /*
-       * This intentionally returns the supported YouTube player URL rather than
-       * pretending that the Data API supplies a raw audio file URL.
-       */
+      if (!track.isStreamable) {
+        throw new Error('This Audius track is not available for streaming');
+      }
+
+      const query = new URLSearchParams({ app_name: APP_NAME });
+      const apiKey = getApiKey();
+      if (apiKey) query.set('api_key', apiKey);
+
+      const url =
+        API + '/tracks/' + encodeURIComponent(trackId) +
+        '/stream?' + query.toString();
+
       return ok({
-        url: item.embedUrl,
-        playbackUrl: item.videoUrl,
-        videoId,
-        title: item.title,
-        artist: item.artist,
-        album: item.album,
-        artwork: item.artwork,
-        durationSeconds: item.durationSeconds,
-        source: 'youtube',
-        playbackType: 'youtube-embed'
+        url,
+        headers: { Accept: 'audio/mpeg' },
+        mimeType: 'audio/mpeg',
+        extension: 'mp3',
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        artwork: track.artwork,
+        durationSeconds: track.durationSeconds,
+        quality: 'Audius stream',
+        source: 'audius',
+        sourceId: trackId,
+        playbackType: 'audio'
       });
     } catch (e) {
       return fail(e && e.message ? e.message : e);
@@ -278,3 +324,40 @@
   globalThis.extractTracks = extractTracks;
   globalThis.extractAudioUrl = extractAudioUrl;
 })();
+{
+  "contractVersion": 3,
+  "releaseTrack": "stable",
+  "contentType": "music",
+  "moduleVersion": "1.3.0",
+  "moduleFamilyId": "synthetiq_music_hub",
+  "moduleIdentity": "SP-MUS-3005-MUSIC-HUB",
+  "moduleIdentityNumber": 3005,
+  "config": {
+    "runtime": {
+      "entry": "index.js",
+      "mode": "local"
+    },
+    "caps": {
+      "homeMaxResults": 50,
+      "maxResponseBytes": 10485760,
+      "timeoutMs": 30000,
+      "maxConcurrentRequests": 3
+    }
+  },
+  "configuration": {
+    "fields": [
+      {
+        "key": "audiusApiKey",
+        "type": "secret",
+        "title": "Audius API Key (optional)",
+        "required": false,
+        "description": "Optional Audius API key for higher API limits. Public read-only access works without a key."
+      }
+    ]
+  },
+  "source": {
+    "provider": "Audius",
+    "api": "https://api.audius.co/v1",
+    "audioOnly": true
+  }
+}
